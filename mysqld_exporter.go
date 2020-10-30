@@ -62,6 +62,8 @@ var (
 		"Ignore certificate and server verification when using a tls connection.",
 	).Bool()
 	dsn string
+	user string
+	password string
 )
 
 // scrapers lists all possible collection methods and if they should be enabled by default.
@@ -101,41 +103,25 @@ var scrapers = map[collector.Scraper]bool{
 	collector.ScrapeReplicaHost{}:                         false,
 }
 
-func parseMycnf(config interface{}) (string, error) {
-	var dsn string
+func parseMycnf(config interface{}) (string,string, error) {
+	var user string
+	var password string
 	opts := ini.LoadOptions{
 		// MySQL ini file can have boolean keys.
 		AllowBooleanKeys: true,
 	}
 	cfg, err := ini.LoadSources(opts, config)
 	if err != nil {
-		return dsn, fmt.Errorf("failed reading ini file: %s", err)
+		return user,password,fmt.Errorf("failed reading ini file: %s", err)
 	}
-	user := cfg.Section("client").Key("user").String()
-	password := cfg.Section("client").Key("password").String()
+	user = cfg.Section("client").Key("user").String()
+	password = cfg.Section("client").Key("password").String()
+
 	if (user == "") || (password == "") {
-		return dsn, fmt.Errorf("no user or password specified under [client] in %s", config)
-	}
-	host := cfg.Section("client").Key("host").MustString("localhost")
-	port := cfg.Section("client").Key("port").MustUint(3306)
-	socket := cfg.Section("client").Key("socket").String()
-	if socket != "" {
-		dsn = fmt.Sprintf("%s:%s@unix(%s)/", user, password, socket)
-	} else {
-		dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/", user, password, host, port)
-	}
-	sslCA := cfg.Section("client").Key("ssl-ca").String()
-	sslCert := cfg.Section("client").Key("ssl-cert").String()
-	sslKey := cfg.Section("client").Key("ssl-key").String()
-	if sslCA != "" {
-		if tlsErr := customizeTLS(sslCA, sslCert, sslKey); tlsErr != nil {
-			tlsErr = fmt.Errorf("failed to register a custom TLS configuration for mysql dsn: %s", tlsErr)
-			return dsn, tlsErr
-		}
-		dsn = fmt.Sprintf("%s?tls=custom", dsn)
+		return user,password,fmt.Errorf("no user or password specified under [client] in %s", config)
 	}
 
-	return dsn, nil
+	return user,password,nil
 }
 
 func customizeTLS(sslCA string, sslCert string, sslKey string) error {
@@ -172,7 +158,12 @@ func init() {
 func newHandler(metrics collector.Metrics, scrapers []collector.Scraper, logger log.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		filteredScrapers := scrapers
-		params := r.URL.Query()["collect[]"]
+		v := r.URL.Query()
+		params := v["collect[]"]
+		insname := v.Get("target")
+		target := strings.Split(insname,":")[0]
+		port,_ := strconv.Atoi(strings.Split(insname,":")[1])
+		dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/", user, password, target, port)
 		// Use request context for cancellation when connection gets closed.
 		ctx := r.Context()
 		// If a timeout is configured via the Prometheus header, add it to the context.
@@ -265,10 +256,11 @@ func main() {
 	level.Info(logger).Log("msg", "Starting msqyld_exporter", "version", version.Info())
 	level.Info(logger).Log("msg", "Build context", version.BuildContext())
 
-	dsn = os.Getenv("DATA_SOURCE_NAME")
-	if len(dsn) == 0 {
+	user = os.Getenv("MYSQL_USER")
+	password = os.Getenv("MYSQL_PASSWORD")
+	if len(password) == 0 || len(user) == 0{
 		var err error
-		if dsn, err = parseMycnf(*configMycnf); err != nil {
+		if user,password, err = parseMycnf(*configMycnf); err != nil {
 			level.Info(logger).Log("msg", "Error parsing my.cnf", "file", *configMycnf, "err", err)
 			os.Exit(1)
 		}
